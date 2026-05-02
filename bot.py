@@ -460,6 +460,8 @@ async def tick(body: TickBody) -> dict[str, Any]:
         if not category:
             continue
         customer = get_payload("customer", trigger.get("customer_id")) if trigger.get("customer_id") else None
+        if trigger.get("scope") == "customer" and not customer:
+            continue
         message = compose(category, merchant, trigger, customer)
         if not message.get("body"):
             sent_suppression_keys.add(suppression)

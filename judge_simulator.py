@@ -16,6 +16,8 @@ That's it!
 Author: magicpin AI Challenge Team
 """
 
+import os
+
 # =============================================================================
 # ██████  CONFIGURATION - EDIT THIS SECTION ██████
 # =============================================================================
@@ -24,10 +26,10 @@ Author: magicpin AI Challenge Team
 BOT_URL = "http://localhost:8080"
 
 # Choose your LLM provider: "openai", "anthropic", "gemini", "deepseek", "groq", "ollama", "openrouter"
-LLM_PROVIDER = "openai"
+LLM_PROVIDER = "gemini"
 
 # Your API key (paste your key here)
-LLM_API_KEY = ""  # <-- PUT YOUR API KEY HERE
+LLM_API_KEY = os.getenv("LLM_API_KEY", "")  # e.g. export LLM_API_KEY="..."
 
 # Model to use (leave empty for default, or specify like "gpt-4o", "claude-3-5-sonnet-20241022", etc.)
 LLM_MODEL = ""  # <-- Optional: specify model or leave empty for default
@@ -38,11 +40,13 @@ OLLAMA_URL = "http://localhost:11434"
 # Which test to run by default
 TEST_SCENARIO = "all"
 
+# Delay between scoring calls. Gemini free/flash tiers can 429 on the full run.
+LLM_SCORE_DELAY_SECONDS = 2.0
+
 # =============================================================================
 # ██████  END OF CONFIGURATION - DON'T EDIT BELOW THIS LINE ██████
 # =============================================================================
 
-import os
 import sys
 import json
 import time
@@ -531,11 +535,26 @@ Score each dimension 0-10 with clear reasoning. Be STRICT."""
 
         try:
             print_llm("Analyzing message...")
-            response = self.llm.complete(prompt, self.SYSTEM)
+            if LLM_SCORE_DELAY_SECONDS:
+                time.sleep(LLM_SCORE_DELAY_SECONDS)
+            response = self._complete_with_retry(prompt)
             return self._parse_response(response, action)
         except Exception as e:
             print_warn(f"LLM error: {e}")
             return self._fallback_score(action)
+
+    def _complete_with_retry(self, prompt: str) -> str:
+        """Retry transient provider throttles so full_evaluation produces real scores."""
+        last_error = None
+        for attempt in range(3):
+            try:
+                return self.llm.complete(prompt, self.SYSTEM)
+            except Exception as e:
+                last_error = e
+                if "429" not in str(e) and "Too Many Requests" not in str(e):
+                    raise
+                time.sleep(5 * (attempt + 1))
+        raise last_error
 
     def _parse_response(self, response: str, action: Dict) -> ScoreResult:
         """Parse LLM JSON response."""
