@@ -18,6 +18,24 @@ Author: magicpin AI Challenge Team
 
 import os
 
+
+def load_dotenv(path: str = ".env") -> None:
+    """Tiny .env loader so the simulator does not need python-dotenv."""
+    if not os.path.exists(path):
+        return
+    with open(path) as fp:
+        for raw_line in fp:
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            os.environ.setdefault(key, value)
+
+
+load_dotenv()
+
 # =============================================================================
 # ██████  CONFIGURATION - EDIT THIS SECTION ██████
 # =============================================================================
@@ -26,22 +44,25 @@ import os
 BOT_URL = "http://localhost:8080"
 
 # Choose your LLM provider: "openai", "anthropic", "gemini", "deepseek", "groq", "ollama", "openrouter"
-LLM_PROVIDER = "gemini"
+LLM_PROVIDER = "openrouter"
 
-# Your API key (paste your key here)
-LLM_API_KEY = os.getenv("LLM_API_KEY", "")  # e.g. export LLM_API_KEY="..."
+# Your API key. For OpenRouter, set OPENROUTER_API_KEY in .env.
+LLM_API_KEY = os.getenv("OPENROUTER_API_KEY") or os.getenv("LLM_API_KEY", "")
 
 # Model to use (leave empty for default, or specify like "gpt-4o", "claude-3-5-sonnet-20241022", etc.)
-LLM_MODEL = ""  # <-- Optional: specify model or leave empty for default
+LLM_MODEL = "openai/gpt-4.1"
 
 # For Ollama only: local server URL
 OLLAMA_URL = "http://localhost:11434"
 
 # Which test to run by default
-TEST_SCENARIO = "all"
+TEST_SCENARIO = "full_evaluation"
 
-# Delay between scoring calls. Gemini free/flash tiers can 429 on the full run.
-LLM_SCORE_DELAY_SECONDS = 2.0
+# Reset the local bot's in-memory state before each simulator run.
+RESET_BOT_BEFORE_RUN = True
+
+# Delay between scoring calls to avoid provider rate limits during full_evaluation.
+LLM_SCORE_DELAY_SECONDS = 0.5
 
 # =============================================================================
 # ██████  END OF CONFIGURATION - DON'T EDIT BELOW THIS LINE ██████
@@ -322,7 +343,8 @@ class OpenRouterProvider(LLMProvider):
             data=json.dumps({"model": self.model, "messages": messages,
                             "temperature": 0.2, "max_tokens": 1500}).encode("utf-8"),
             headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json",
-                     "HTTP-Referer": "https://magicpin.com"}
+                     "HTTP-Referer": "https://magicpin.com",
+                     "X-Title": "magicpin AI Challenge Judge"}
         )
         resp = urlrequest.urlopen(req, timeout=TIMEOUT_LLM)
         data = json.loads(resp.read().decode("utf-8"))
@@ -418,6 +440,9 @@ class BotClient:
 
     def metadata(self):
         return self._request("GET", "/v1/metadata", 5)
+
+    def teardown(self):
+        return self._request("POST", "/v1/teardown", 5, {})
 
     def push_context(self, scope, cid, version, payload):
         return self._request("POST", "/v1/context", 10, {
@@ -649,6 +674,13 @@ class JudgeSimulator:
             print_fail(f"healthz: {err}")
             return False
         print_success(f"healthz ({lat:.0f}ms)")
+
+        if RESET_BOT_BEFORE_RUN:
+            data, err, lat = self.client.teardown()
+            if err:
+                print_warn(f"teardown/reset skipped: {err}")
+            else:
+                print_success(f"reset bot state ({lat:.0f}ms)")
 
         data, err, lat = self.client.metadata()
         if err:
