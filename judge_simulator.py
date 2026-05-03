@@ -877,7 +877,7 @@ class JudgeSimulator:
             print_info(f"Batch {i//5 + 1}: {len(actions)} actions ({lat:.0f}ms)")
 
             for action in actions:
-                self._score_and_display(action, verbose=False)
+                self._score_and_display(action, verbose=True)
 
         return True
 

@@ -151,6 +151,61 @@ def category_loss_hook(category_slug: str) -> str:
     }.get(category_slug, "so the next action is clear")
 
 
+def category_artifact(category_slug: str, offer: str, include_offer: bool = True) -> str:
+    service = offer or "your lead service"
+    prefix = f"{service} " if include_offer and offer else ""
+    return {
+        "dentists": f"{prefix}patient-ed WhatsApp + clinical Google post",
+        "salons": f"{prefix}WhatsApp offer + Google post with booking line",
+        "restaurants": f"{prefix}menu push + Google post for nearby searches",
+        "gyms": f"{prefix}trial-class WhatsApp + member-retention post",
+        "pharmacies": f"{prefix}counter checklist + customer WhatsApp note",
+    }.get(category_slug, f"{prefix}WhatsApp + Google post")
+
+
+def concise(text: str, max_len: int = 125) -> str:
+    if len(text) <= max_len:
+        return text
+    cut = text[:max_len].rsplit(". ", 1)[0].strip()
+    if len(cut) < 45:
+        cut = text[:max_len].rsplit(" ", 1)[0].strip()
+    return cut.rstrip(".,;:")
+
+
+def recent_intent(merchant: dict[str, Any]) -> str:
+    history = merchant.get("conversation_history") or []
+    for turn in reversed(history):
+        if turn.get("from") == "merchant" and turn.get("body"):
+            return str(turn["body"])
+    return ""
+
+
+def top_review_theme(merchant: dict[str, Any], sentiment: str | None = None) -> dict[str, Any] | None:
+    themes = merchant.get("review_themes") or []
+    if sentiment:
+        for theme in themes:
+            if theme.get("sentiment") == sentiment:
+                return theme
+    return themes[0] if themes else None
+
+
+def aggregate_hook(merchant: dict[str, Any], category_slug: str) -> str:
+    agg = merchant.get("customer_aggregate") or {}
+    if category_slug == "dentists" and agg.get("high_risk_adult_count"):
+        return f"{agg['high_risk_adult_count']} high-risk adult patients"
+    if category_slug == "salons" and agg.get("lapsed_90d_plus"):
+        return f"{agg['lapsed_90d_plus']} customers lapsed 90d+"
+    if category_slug == "restaurants" and agg.get("delivery_orders_30d"):
+        return f"{agg['delivery_orders_30d']} delivery orders in 30d"
+    if category_slug == "gyms" and agg.get("total_active_members"):
+        return f"{agg['total_active_members']} active members"
+    if category_slug == "pharmacies" and agg.get("chronic_customers"):
+        return f"{agg['chronic_customers']} chronic customers"
+    if agg.get("total_unique_ytd"):
+        return f"{agg['total_unique_ytd']} customers YTD"
+    return ""
+
+
 def digest_item(category: dict[str, Any], trigger: dict[str, Any]) -> dict[str, Any] | None:
     payload = trigger.get("payload", {})
     wanted = payload.get("top_item_id") or payload.get("digest_item_id") or payload.get("alert_id")
@@ -298,7 +353,13 @@ def compose(category: dict[str, Any], merchant: dict[str, Any], trigger: dict[st
     offer = active_offer(merchant, category)
     action_label = category_action_label(category_slug)
     loss_hook = category_loss_hook(category_slug)
+    artifact = category_artifact(category_slug, offer)
+    plain_artifact = category_artifact(category_slug, offer, include_offer=False)
     metrics = metric_line(merchant)
+    agg_hook = aggregate_hook(merchant, category_slug)
+    last_intent = recent_intent(merchant)
+    positive_theme = top_review_theme(merchant, "pos")
+    negative_theme = top_review_theme(merchant, "neg")
     peer_ctr = get_in(category, "peer_stats.avg_ctr")
     signals = merchant.get("signals", [])
     lang = language_hint(merchant)
@@ -318,6 +379,8 @@ def compose(category: dict[str, Any], merchant: dict[str, Any], trigger: dict[st
         merchant_hook = ""
         if "high_risk_adult_cohort" in signals and segment:
             merchant_hook = f" This maps to your {segment} cohort."
+        elif agg_hook:
+            merchant_hook = f" Relevant to your {agg_hook}."
         elif peer_ctr and get_in(merchant, "performance.ctr") and get_in(merchant, "performance.ctr") < peer_ctr:
             merchant_hook = f" Your CTR is {pct(get_in(merchant, 'performance.ctr'), False)} vs peer {pct(peer_ctr, False)}."
         deadline = payload.get("deadline_iso", "")[:10]
@@ -327,9 +390,9 @@ def compose(category: dict[str, Any], merchant: dict[str, Any], trigger: dict[st
             fee = humanize(payload.get("fee") or item.get("actionable", ""))
             body = f"{name}, {title} is on the IDA calendar. {credits} CDE credits; {fee}. Reply YES and I’ll send a 2-line registration note + calendar reminder."
         elif kind == "regulation_change":
-            body = f"{name}, important compliance note: {title}. {summary[:125]}{deadline_text} Reply YES and I’ll make a 6-point SOP checklist for {business}."
+            body = f"{name}, important compliance note: {title}. {concise(summary)}.{deadline_text} Reply YES and I’ll make a 6-point SOP checklist for {business}."
         else:
-            body = f"{name}, {source} has one useful item: {trial}{title}.{merchant_hook} Reply YES and I’ll pull the abstract + draft one patient WhatsApp."
+            body = f"{name}, {source} has one useful item: {trial}{title}.{merchant_hook} Reply YES and I’ll pull the abstract + draft one patient WhatsApp in your clinic voice."
         rationale = f"Uses the pushed digest item/source for {category_slug}, ties it to merchant signals, and asks for a low-friction next step."
 
     elif kind in {"perf_dip", "seasonal_perf_dip"}:
@@ -339,7 +402,8 @@ def compose(category: dict[str, Any], merchant: dict[str, Any], trigger: dict[st
         season = payload.get("season_note", "").replace("_", " ")
         context = f" vs usual {baseline}" if baseline else ""
         season_text = f" This may be seasonal ({season}), so don't overcorrect." if payload.get("is_expected_seasonal") else ""
-        body = f"{name}, dashboard flag: {metric} is {delta} over {payload.get('window', '7d')}{context}. {metrics}.{season_text} Reply YES and I’ll draft one {offer or 'strongest-service'} Google post to recover demand."
+        review_bit = f" I’ll avoid the {negative_theme['theme'].replace('_', ' ')} complaint angle." if negative_theme else ""
+        body = f"{name}, dashboard flag: {metric} is {delta} over {payload.get('window', '7d')}{context}. {metrics}.{season_text}{review_bit} Reply YES and I’ll draft one {artifact} to recover demand."
         rationale = "Internal performance dip with exact metric, delta, baseline, and a concrete recovery action."
 
     elif kind == "perf_spike":
@@ -347,13 +411,14 @@ def compose(category: dict[str, Any], merchant: dict[str, Any], trigger: dict[st
         driver = payload.get("likely_driver")
         driver_text = f" Likely driver: {driver.replace('_', ' ')}." if driver else ""
         delta = pct(payload.get("delta_pct")) or pct(get_in(merchant, f"performance.delta_7d.{metric}_pct")) or "up"
-        body = f"{name}, nice spike: {metric} is {delta} in {payload.get('window', '7d')}; {metrics}.{driver_text} Reply YES and I’ll turn the spike into one repeatable post + offer for this week."
+        theme_bit = f" We can lean on your {positive_theme['theme'].replace('_', ' ')} reviews." if positive_theme else ""
+        body = f"{name}, nice spike: {metric} is {delta} in {payload.get('window', '7d')}; {metrics}.{driver_text}{theme_bit} Reply YES and I’ll turn the spike into one repeatable post + offer for this week."
         rationale = "Positive internal trigger that names the metric and converts momentum into an action."
 
     elif kind == "renewal_due":
         days = payload.get("days_remaining") or get_in(merchant, "subscription.days_remaining")
         amount = rupee(payload.get("renewal_amount"))
-        body = f"{name}, Pro renewal is due in {days} days{f' ({amount})' if amount else ''}. Current 30-day result: {metrics}. Reply YES and I’ll prepare a renewal summary with wins, pending fixes, and next 30-day plan."
+        body = f"{name}, Pro renewal is due in {days} days{f' ({amount})' if amount else ''}. Current 30-day result: {metrics}{f'; {agg_hook}' if agg_hook else ''}. Reply YES and I’ll prepare a renewal summary with wins, pending fixes, and next 30-day plan."
         rationale = "Renewal trigger anchored in days remaining, amount when present, and recent performance."
 
     elif kind in {"winback_eligible", "dormant_with_vera"}:
@@ -361,7 +426,7 @@ def compose(category: dict[str, Any], merchant: dict[str, Any], trigger: dict[st
         lapsed = payload.get("lapsed_customers_added_since_expiry") or get_in(merchant, "customer_aggregate.lapsed_90d_plus") or get_in(merchant, "customer_aggregate.lapsed_180d_plus")
         day_text = f"{days} days" if days is not None else "a while"
         lapsed_text = f"{lapsed} lapsed customers" if lapsed is not None else "your lapsed-customer pool"
-        body = f"{name}, it has been {day_text} since the last active Vera loop. I spotted {lapsed_text} and {metrics}. Reply YES and I’ll make a 3-message winback draft using {offer or 'a service-price offer'}."
+        body = f"{name}, it has been {day_text} since the last active Vera loop. I spotted {lapsed_text} and {metrics}. Reply YES and I’ll make a 3-message winback draft using {offer or 'a service-price offer'} with one proof line from your profile."
         rationale = "Dormancy/winback message uses elapsed time, lapsed customer count, and effort externalization."
 
     elif kind == "review_theme_emerged":
@@ -376,9 +441,10 @@ def compose(category: dict[str, Any], merchant: dict[str, Any], trigger: dict[st
         milestone = payload.get("milestone_value")
         metric = humanize(payload.get("metric"), "reviews")
         if value_now is not None and milestone is not None:
-            body = f"{name}, {business} is at {value_now} {metric} - almost {milestone}. Reply YES and I’ll draft a thank-you post + polite review ask to cross it this week."
+            theme_bit = f" I’ll anchor it on your {positive_theme['theme'].replace('_', ' ')} praise." if positive_theme else ""
+            body = f"{name}, {business} is at {value_now} {metric} - almost {milestone}.{theme_bit} Reply YES and I’ll draft a thank-you post + polite review ask to cross it this week."
         else:
-            body = f"{name}, {business} has a {metric} milestone window active. Current snapshot: {metrics}. Reply YES and I’ll draft a thank-you post + polite review ask."
+            body = f"{name}, {business} has a {metric} milestone window active. Current snapshot: {metrics}. Reply YES and I’ll draft a thank-you post + polite review ask with one profile proof point."
         rationale = "Milestone trigger turns an imminent metric into a social-proof action."
 
     elif kind in {"competitor_opened"}:
@@ -387,29 +453,35 @@ def compose(category: dict[str, Any], merchant: dict[str, Any], trigger: dict[st
         their = payload.get("their_offer")
         date = payload.get("opened_date")
         if comp and dist and their and date:
-            body = f"{name}, {comp} opened {dist} km from {locality} on {date}. Their visible hook is {their}. Reply YES and I’ll draft a sharper {offer or category_slug.rstrip('s')} post so you don’t compete only on price."
+            body = f"{name}, {comp} opened {dist} km from {locality} on {date}. Their visible hook is {their}. Reply YES and I’ll draft a sharper {artifact} so you don’t compete only on price."
         else:
-            body = f"{name}, a competitor signal is active near {locality}. Your current hook is {offer or category_slug.rstrip('s')}. Reply YES and I’ll draft a sharper Google post so you don’t compete only on price."
+            body = f"{name}, a competitor signal is active near {locality}. Your current hook is {offer or category_slug.rstrip('s')}. Reply YES and I’ll draft a sharper {artifact} so you don’t compete only on price."
         rationale = "Competitor trigger uses only provided competitor details and suggests a defensible counter-position."
 
     elif kind in {"festival_upcoming", "ipl_match_today", "category_seasonal"}:
         if kind == "ipl_match_today":
             event = f"{payload.get('match')} at {payload.get('match_time_iso', '')[11:16]}"
-            body = f"{name}, {event} is today in {payload.get('city', get_in(merchant, 'identity.city'))}. You already have {offer or 'an active offer'}. Reply YES and I’ll make a match-night Google post for nearby searches."
+            order_hook = f" You already have {offer or 'an active offer'}"
+            if agg_hook:
+                order_hook += f" and {agg_hook}"
+            body = f"{name}, {event} is today in {payload.get('city', get_in(merchant, 'identity.city'))}.{order_hook}. Reply YES and I’ll make a match-night post for nearby searches."
         elif kind == "category_seasonal":
             trends = ", ".join(payload.get("trends", [])[:3]).replace("_", " ")
-            body = f"{name}, summer demand shifted: {trends}. {metrics}. Reply YES and I’ll make a 7-day shelf/post checklist for {business}."
+            body = f"{name}, summer demand shifted: {trends}. {metrics}. Reply YES and I’ll make a 7-day shelf/post checklist for {business} so staff know what to push first."
         else:
             festival = payload.get("festival")
             days = payload.get("days_until")
             event_text = f"{festival} is {days} days away" if festival and days is not None else "a seasonal demand window is open"
-            body = f"{name}, {event_text}. For {category_slug}, {offer or 'service-price bundles'} will beat generic discounts. Reply YES and I’ll draft one WhatsApp + GBP post."
+            body = f"{name}, {event_text}. In {locality}, {offer or 'service-price bundles'} will beat generic discounts. Reply YES and I’ll draft one {plain_artifact}."
         rationale = "External timing trigger linked to category-appropriate commercial action."
 
     elif kind in {"active_planning_intent"}:
         topic = payload.get("intent_topic", "the plan").replace("_", " ")
         last = payload.get("merchant_last_message", "")
-        body = f"{name}, picking up from your message: \"{last}\". I’ll make {topic} concrete: package name, ₹ price anchor, 1 Google post, 1 WhatsApp copy, and who to send it to. Reply YES and I’ll format the full draft."
+        intent_text = last or last_intent
+        base = f"picking up from your message: \"{intent_text}\"" if intent_text else f"picking up the {topic} plan"
+        proof = f" I’ll use {offer} as the price anchor." if offer else f" I’ll use {metrics} as the proof point."
+        body = f"{name}, {base}.{proof} I’ll make {topic} concrete: package name, ₹ price anchor, 1 Google post, 1 WhatsApp copy, and who to send it to. Reply YES and I’ll format the full draft."
         rationale = "Honors explicit merchant intent and moves directly into action."
 
     elif kind in {"gbp_unverified"}:
@@ -424,7 +496,8 @@ def compose(category: dict[str, Any], merchant: dict[str, Any], trigger: dict[st
         rationale = "High-urgency pharmacy supply alert with exact molecule, batches, and manufacturer."
 
     elif kind in {"curious_ask_due"}:
-        body = f"{name}, quick operator question for {locality}: are people asking more for {offer or 'your main service'}, or something else this week? Reply with the service name and I’ll turn it into one post."
+        review_guess = f"Reviews already praise {positive_theme['theme'].replace('_', ' ')}; " if positive_theme else ""
+        body = f"{name}, quick operator question for {locality}: {review_guess}are people asking more for {offer or 'your main service'}, or something else this week? Reply with the service name and I’ll turn it into one post."
         rationale = "Curiosity-driven ask designed to elicit merchant input and then do the work."
 
     else:
